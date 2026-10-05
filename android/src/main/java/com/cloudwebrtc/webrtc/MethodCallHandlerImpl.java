@@ -115,6 +115,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   private final Map<String, MediaStream> localStreams = new HashMap<>();
   private final Map<String, LocalTrack> localTracks = new HashMap<>();
   private final LongSparseArray<FlutterRTCVideoRenderer> renders = new LongSparseArray<>();
+  private ExternalVideoSource externalVideoSource;
 
   public RecordSamplesReadyCallbackAdapter recordSamplesReadyCallbackAdapter;
 
@@ -170,6 +171,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   }
 
   void dispose() {
+    if (externalVideoSource != null) {
+      externalVideoSource.dispose();
+      externalVideoSource = null;
+    }
     for (final MediaStream mediaStream : localStreams.values()) {
       streamDispose(mediaStream);
       mediaStream.dispose();
@@ -451,6 +456,33 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       case "createLocalMediaStream":
         createLocalMediaStream(result);
         break;
+      case "createExternalVideoTrack": {
+        try {
+          if (externalVideoSource == null) {
+            externalVideoSource = new ExternalVideoSource(this);
+          }
+          result.success(externalVideoSource.toResultMap().toMap());
+        } catch (Exception e) {
+          resultError("createExternalVideoTrack", e.getMessage(), result);
+        }
+        break;
+      }
+      case "getExternalVideoTrackStats": {
+        if (externalVideoSource == null) {
+          result.success(null);
+        } else {
+          result.success(externalVideoSource.stats().toMap());
+        }
+        break;
+      }
+      case "disposeExternalVideoTrack": {
+        if (externalVideoSource != null) {
+          externalVideoSource.dispose();
+          externalVideoSource = null;
+        }
+        result.success(null);
+        break;
+      }
       case "getSources":
         getSources(result);
         break;
@@ -1502,6 +1534,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     synchronized (localTracks) {
       return localTracks.get(trackId);
     }
+  }
+
+  @Override
+  public LocalTrack removeLocalTrack(String trackId) {
+    synchronized (localTracks) {
+      return localTracks.remove(trackId);
+    }
+  }
+
+  @Override
+  public MediaStream removeLocalStream(String streamId) {
+    return localStreams.remove(streamId);
   }
 
   public MediaStreamTrack getRemoteTrack(String trackId) {
