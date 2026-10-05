@@ -102,6 +102,27 @@ Future<MediaStream> createLocalMediaStream(String label) async {
   return RTCFactoryNative.instance.createLocalMediaStream(label);
 }
 
+/// Creates an Android external video source registered as a normal local
+/// flutter_webrtc MediaStream/MediaStreamTrack. The native producer supplies
+/// frames in-process; raw frames never cross this MethodChannel.
+Future<MediaStream> createExternalVideoTrack() async {
+  final response = await WebRTC.invokeMethod('createExternalVideoTrack');
+  if (response == null) {
+    throw Exception('createExternalVideoTrack returned null');
+  }
+  return MediaStreamNative.fromMap(response);
+}
+
+Future<Map<String, dynamic>?> getExternalVideoTrackStats() async {
+  final response = await WebRTC.invokeMethod('getExternalVideoTrackStats');
+  if (response == null) return null;
+  return Map<String, dynamic>.from(response);
+}
+
+Future<void> disposeExternalVideoTrack() async {
+  await WebRTC.invokeMethod('disposeExternalVideoTrack');
+}
+
 Future<RTCRtpCapabilities> getRtpReceiverCapabilities(String kind) async {
   return RTCFactoryNative.instance.getRtpReceiverCapabilities(kind);
 }
