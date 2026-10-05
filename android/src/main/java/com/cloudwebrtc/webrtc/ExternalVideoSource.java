@@ -98,6 +98,7 @@ public final class ExternalVideoSource {
 
     ConstraintsMap result = new ConstraintsMap();
     result.putString("streamId", streamId);
+    result.putString("ownerTag", "local");
     result.putArray("audioTracks", new ConstraintsArray().toArrayList());
     result.putArray("videoTracks", videoTracks.toArrayList());
     return result;
