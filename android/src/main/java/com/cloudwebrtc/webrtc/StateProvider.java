@@ -24,6 +24,10 @@ public interface StateProvider {
 
   LocalTrack getLocalTrack(String trackId);
 
+  LocalTrack removeLocalTrack(String trackId);
+
+  MediaStream removeLocalStream(String streamId);
+
   String getNextStreamUUID();
 
   String getNextTrackUUID();
