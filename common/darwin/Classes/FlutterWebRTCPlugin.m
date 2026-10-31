@@ -17,6 +17,7 @@
 #import "AudioManager.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <CoreVideo/CoreVideo.h>
 #import <WebRTC/RTCFieldTrials.h>
 #import <WebRTC/WebRTC.h>
 
@@ -110,11 +111,142 @@ void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
 #if TARGET_OS_IPHONE
+  // YOU iOS external camera track: samples stay on the native side of Flutter.
+  RTCVideoSource *_youExternalSource;
+  RTCVideoCapturer *_youExternalCapturer;
+  RTCVideoTrack *_youExternalTrack;
+  RTCMediaStream *_youExternalStream;
+  id _youExternalFrameObserver;
+  uint64_t _youFramesReceived, _youFramesSubmitted, _youFramesDropped;
+  int _youExternalWidth, _youExternalHeight;
+#endif
+
+#if TARGET_OS_IPHONE
   FLutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
 }
+
+
+// YOU iOS: the glasses producer posts this notification with a CVPixelBuffer
+// from Meta DAT's raw VideoFrame.sampleBuffer. No pixel bytes cross Dart.
+#if TARGET_OS_IPHONE
+- (void)youCreateExternalVideoTrack:(FlutterResult)result {
+  @synchronized (self) {
+    if (_youExternalStream != nil) {
+      result([self mediaStreamToMap:_youExternalStream ownerTag:@"local"]);
+      return;
+    }
+    RTCPeerConnectionFactory *factory = self.peerConnectionFactory;
+    if (factory == nil) {
+      result([FlutterError errorWithCode:@"external_video_unavailable"
+                                message:@"WebRTC factory is not initialized."
+                                details:nil]);
+      return;
+    }
+    _youExternalSource = [factory videoSource];
+    _youExternalCapturer = [[RTCVideoCapturer alloc] initWithDelegate:_youExternalSource];
+    NSString *trackId = [NSUUID UUID].UUIDString;
+    NSString *streamId = [NSUUID UUID].UUIDString;
+    _youExternalTrack = [factory videoTrackWithSource:_youExternalSource trackId:trackId];
+    _youExternalStream = [factory mediaStreamWithStreamId:streamId];
+    if (!_youExternalSource || !_youExternalTrack || !_youExternalStream) {
+      [self youDisposeExternalVideoTrack];
+      result([FlutterError errorWithCode:@"external_video_unavailable"
+                                message:@"Could not allocate a native WebRTC video track."
+                                details:nil]);
+      return;
+    }
+    [_youExternalStream addVideoTrack:_youExternalTrack];
+    self.localTracks[trackId] = [[LocalVideoTrack alloc] initWithTrack:_youExternalTrack];
+    self.localStreams[streamId] = _youExternalStream;
+    _youFramesReceived = _youFramesSubmitted = _youFramesDropped = 0;
+    _youExternalWidth = _youExternalHeight = 0;
+
+    __weak typeof(self) weakSelf = self;
+    _youExternalFrameObserver = [[NSNotificationCenter defaultCenter]
+      addObserverForName:@"YOUExternalVideoFrame"
+      object:nil
+      queue:nil
+      usingBlock:^(NSNotification *note) {
+        [weakSelf youConsumeExternalFrame:note];
+      }];
+    result([self mediaStreamToMap:_youExternalStream ownerTag:@"local"]);
+  }
+}
+
+- (void)youConsumeExternalFrame:(NSNotification *)notification {
+  @synchronized (self) {
+    if (_youExternalSource == nil || _youExternalCapturer == nil) return;
+    _youFramesReceived++;
+    id object = notification.object;
+    if (object == nil ||
+        CFGetTypeID((__bridge CFTypeRef)object) != CVPixelBufferGetTypeID()) {
+      _youFramesDropped++;
+      return;
+    }
+    CVPixelBufferRef pixelBuffer = (__bridge CVPixelBufferRef)object;
+    const size_t width = CVPixelBufferGetWidth(pixelBuffer);
+    const size_t height = CVPixelBufferGetHeight(pixelBuffer);
+    if (width == 0 || height == 0) {
+      _youFramesDropped++;
+      return;
+    }
+    // The Meta producer posts sample-buffer presentation timestamps in ns.
+    NSNumber *providedTime = notification.userInfo[@"timestampNs"];
+    int64_t timestampNs = providedTime != nil
+        ? providedTime.longLongValue
+        : (int64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
+    RTCCVPixelBuffer *buffer = [[RTCCVPixelBuffer alloc] initWithPixelBuffer:pixelBuffer];
+    RTCVideoFrame *frame = [[RTCVideoFrame alloc]
+        initWithBuffer:buffer
+             rotation:RTCVideoRotation_0
+          timeStampNs:timestampNs];
+    [_youExternalSource capturer:_youExternalCapturer didCaptureVideoFrame:frame];
+    _youExternalWidth = (int)width;
+    _youExternalHeight = (int)height;
+    _youFramesSubmitted++;
+  }
+}
+
+- (void)youGetExternalVideoTrackStats:(FlutterResult)result {
+  @synchronized (self) {
+    if (_youExternalStream == nil) { result(nil); return; }
+    result(@{
+      @"trackId": _youExternalTrack.trackId,
+      @"streamId": _youExternalStream.streamId,
+      @"framesReceived": [@(_youFramesReceived) stringValue],
+      @"framesSubmitted": [@(_youFramesSubmitted) stringValue],
+      @"framesDropped": [@(_youFramesDropped) stringValue],
+      @"width": @(_youExternalWidth),
+      @"height": @(_youExternalHeight),
+      @"disposed": @NO
+    });
+  }
+}
+
+- (void)youDisposeExternalVideoTrack {
+  @synchronized (self) {
+    if (_youExternalFrameObserver != nil) {
+      [[NSNotificationCenter defaultCenter] removeObserver:_youExternalFrameObserver];
+      _youExternalFrameObserver = nil;
+    }
+    if (_youExternalTrack != nil) {
+      _youExternalTrack.isEnabled = NO;
+      [_youExternalStream removeVideoTrack:_youExternalTrack];
+      [self.localTracks removeObjectForKey:_youExternalTrack.trackId];
+    }
+    if (_youExternalStream != nil) {
+      [self.localStreams removeObjectForKey:_youExternalStream.streamId];
+    }
+    _youExternalTrack = nil;
+    _youExternalStream = nil;
+    _youExternalCapturer = nil;
+    _youExternalSource = nil;
+  }
+}
+#endif
 
 static FlutterWebRTCPlugin *sharedSingleton;
 
@@ -211,6 +343,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
 }
 
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
+#if TARGET_OS_IPHONE
+  [self youDisposeExternalVideoTrack];
+#endif
+
   for (RTCPeerConnection* peerConnection in _peerConnections.allValues) {
     for (RTCDataChannel* dataChannel in peerConnection.dataChannels) {
       dataChannel.eventSink = nil;
@@ -383,6 +519,26 @@ static FlutterWebRTCPlugin *sharedSingleton;
     [self getDisplayMedia:constraints result:result];
   } else if ([@"createLocalMediaStream" isEqualToString:call.method]) {
     [self createLocalMediaStream:result];
+  } else if ([@"createExternalVideoTrack" isEqualToString:call.method]) {
+#if TARGET_OS_IPHONE
+    [self youCreateExternalVideoTrack:result];
+#else
+    result(FlutterMethodNotImplemented);
+#endif
+  } else if ([@"getExternalVideoTrackStats" isEqualToString:call.method]) {
+#if TARGET_OS_IPHONE
+    [self youGetExternalVideoTrackStats:result];
+#else
+    result(FlutterMethodNotImplemented);
+#endif
+  } else if ([@"disposeExternalVideoTrack" isEqualToString:call.method]) {
+#if TARGET_OS_IPHONE
+    [self youDisposeExternalVideoTrack];
+    result(nil);
+#else
+    result(FlutterMethodNotImplemented);
+#endif
+
   } else if ([@"getSources" isEqualToString:call.method]) {
     [self getSources:result];
   } else if ([@"selectAudioInput" isEqualToString:call.method]) {
